@@ -325,13 +325,7 @@ static NSDictionary* customCertificatesForHost;
     [super removeFromSuperview];
 }
 
-<<<<<<< HEAD:ios/RNCWKWebView.m
-
-#pragma mark  - 解决iOS12后的全屏播放视频后退出全屏，状态栏消失的问题
--(void)toggleFullScreenVideoStatusBars
-=======
 -(void)showFullScreenVideoStatusBars
->>>>>>> c1b3696e015b5eb38ee65ea16aec5ea8f0243caa:ios/RNCWebView.m
 {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     _isFullScreenVideoOpen = YES;
