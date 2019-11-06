@@ -13,8 +13,14 @@
 
 #import "objc/runtime.h"
 
+#import <JavaScriptCore/JavaScriptCore.h> // GM
+#import "RNCWebview+Plus.h" // GM
+
 static NSTimer *keyboardTimer;
-static NSString *const MessageHandlerName = @"ReactNativeWebView";
+// MessageHanderName
+static NSString *const MessageHandlerName = @"ReactNative"; // 用于处理 postmessage 的 MessageHanderName
+static NSString *const SetBodyParamsHeaderKeyMessageHandlerName = @"SetBodyParamsHeaderKeyMessageHandlerName";// 用于保存 body 参数的 MessageHanderName
+static NSString *const SaveBodyParamsMessageHandlerName = @"SaveBodyParamsMessageHandlerName";// 用于保存 body 参数的 MessageHanderName
 static NSURLCredential* clientAuthenticationCredential;
 static NSDictionary* customCertificatesForHost;
 
@@ -151,17 +157,35 @@ static NSDictionary* customCertificatesForHost;
       wkWebViewConfig.processPool = [[RNCWKProcessPoolManager sharedManager] sharedProcessPool];
     }
     wkWebViewConfig.userContentController = [WKUserContentController new];
-
+      
+    // 往 js 注入对象 BRIDGE_NAME // GM
+    NSString *source = [NSString stringWithFormat:
+                  @"(function() {"
+                  "%@ = {};"
+                  "})();", BRIDGE_NAME
+                  ];
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
+    [wkWebViewConfig.userContentController addUserScript:script];
+      
     if (_messagingEnabled) {
       [wkWebViewConfig.userContentController addScriptMessageHandler:self name:MessageHandlerName];
-
+      [wkWebViewConfig.userContentController addScriptMessageHandler: self name: SaveBodyParamsMessageHandlerName];// GM
+      [wkWebViewConfig.userContentController addScriptMessageHandler: self name: SetBodyParamsHeaderKeyMessageHandlerName];// GM
+        
       NSString *source = [NSString stringWithFormat:
-        @"window.%@ = {"
-         "  postMessage: function (data) {"
-         "    window.webkit.messageHandlers.%@.postMessage(String(data));"
-         "  }"
-         "};", MessageHandlerName, MessageHandlerName
-      ];
+                                @"%@.postMessage = function(data) {"
+                                    "window.webkit.messageHandlers.%@.postMessage(String(data));"
+                                "};"
+
+                                "window.shell_setBodyParamsHeaderKey = function(data) {"
+                                    "window.webkit.messageHandlers.%@.postMessage(String(data));"
+                                "};"
+
+                                "window.shell_saveBodyParams = function(data) {"
+                                    "window.webkit.messageHandlers.%@.postMessage(String(data));"
+                                "};",
+                                BRIDGE_NAME, MessageHandlerName, SetBodyParamsHeaderKeyMessageHandlerName, SaveBodyParamsMessageHandlerName
+                          ];
 
       WKUserScript *script = [[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
       [wkWebViewConfig.userContentController addUserScript:script];
@@ -274,6 +298,7 @@ static NSDictionary* customCertificatesForHost;
   }
 }
 
+
 // Update webview property when the component prop changes.
 - (void)setAllowsBackForwardNavigationGestures:(BOOL)allowsBackForwardNavigationGestures {
   _allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures;
@@ -285,6 +310,8 @@ static NSDictionary* customCertificatesForHost;
 {
     if (_webView) {
         [_webView.configuration.userContentController removeScriptMessageHandlerForName:MessageHandlerName];
+        [_webView.configuration.userContentController removeScriptMessageHandlerForName:SetBodyParamsHeaderKeyMessageHandlerName];
+        [_webView.configuration.userContentController removeScriptMessageHandlerForName:SaveBodyParamsMessageHandlerName];
         [_webView removeObserver:self forKeyPath:@"estimatedProgress"];
         [_webView removeFromSuperview];
         _webView.scrollView.delegate = nil;
@@ -315,6 +342,17 @@ static NSDictionary* customCertificatesForHost;
 #pragma clang diagnostic pop
 }
 
+-(void)windowDidBecomeHidden:(NSNotification *)noti{
+    UIWindow * win = (UIWindow *)noti.object;
+    if(win){
+        UIViewController *rootVC = win.rootViewController;
+        NSArray<__kindof UIViewController *> *vcs = rootVC.childViewControllers;
+        if([vcs.firstObject isKindOfClass:NSClassFromString(@"AVPlayerViewController")]){
+            [[UIApplication sharedApplication] setStatusBarHidden:NO withAnimation:UIStatusBarAnimationNone];
+        }
+    }
+}
+#pragma mark  - 解决iOS12后的键盘问题
 -(void)keyboardWillHide
 {
     keyboardTimer = [NSTimer scheduledTimerWithTimeInterval:0 target:self selector:@selector(keyboardDisplacementFix) userInfo:nil repeats:false];
@@ -390,10 +428,26 @@ static NSDictionary* customCertificatesForHost;
 - (void)userContentController:(WKUserContentController *)userContentController
        didReceiveScriptMessage:(WKScriptMessage *)message
 {
-  if (_onMessage != nil) {
-    NSMutableDictionary<NSString *, id> *event = [self baseEvent];
-    [event addEntriesFromDictionary: @{@"data": message.body}];
-    _onMessage(event);
+//    NSLog(@"didReceiveScriptMessage: %@ ;\r\n %@",message.name,message.body);
+  if([message.name isEqualToString:MessageHandlerName]){//  postMessage
+    if (_onMessage != nil) {
+      NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+      [event addEntriesFromDictionary: @{@"data": message.body}];
+      _onMessage(event);
+    }
+  }else if([message.name isEqualToString:SaveBodyParamsMessageHandlerName]){// 保存 request body 参数
+    NSError *jsonError;
+    NSData *objectData = [message.body dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:objectData
+                                                         options:NSJSONReadingMutableContainers
+                                                           error:&jsonError];
+//    NSLog(@"dict: %@",dict);
+    if(jsonError==nil){
+      [[RNCWebview_Plus sharedSingleton] saveRequestBody:dict];
+    }
+  }else if([message.name isEqualToString:SetBodyParamsHeaderKeyMessageHandlerName]){// 保存 request body 参数的 Header key 用于拦截请求重置 httpbody
+    [[RNCWebview_Plus sharedSingleton] setBodyParamsHeaderKey:[RCTConvert NSString:message.body]];
+//    NSLog(@"headerkey:%@",[[RNCWebview_Plus sharedSingleton] bodyParamsHeaderKey]);
   }
 }
 
@@ -402,6 +456,11 @@ static NSDictionary* customCertificatesForHost;
   if (![_source isEqualToDictionary:source]) {
     _source = [source copy];
 
+    // GM
+    if(source[@"srcPath"]!=nil&&![source[@"srcPath"] isEqualToString:@""]){
+      [[RNCWebview_Plus sharedSingleton] setSrcPath:source[@"srcPath"]];
+    }
+      
     if (_webView != nil) {
       [self visitSource];
     }
@@ -639,7 +698,7 @@ static NSDictionary* customCertificatesForHost;
 {
   NSDictionary *eventInitDict = @{@"data": message};
   NSString *source = [NSString
-    stringWithFormat:@"window.dispatchEvent(new MessageEvent('message', %@));",
+    stringWithFormat:@"window.document.dispatchEvent(new MessageEvent('message', %@));",
     RCTJSONStringify(eventInitDict, NULL)
   ];
   [self injectJavaScript: source];
@@ -651,7 +710,6 @@ static NSDictionary* customCertificatesForHost;
 
   // Ensure webview takes the position and dimensions of RNCWebView
   _webView.frame = self.bounds;
-  _webView.scrollView.contentInset = _contentInset;
 }
 
 - (NSMutableDictionary<NSString *, id> *)baseEvent
