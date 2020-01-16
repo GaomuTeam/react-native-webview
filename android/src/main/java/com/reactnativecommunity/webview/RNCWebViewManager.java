@@ -77,7 +77,14 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import java.io.InputStream;
+
 import javax.annotation.Nullable;
+
+import java.net.URLConnection;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.util.regex.Pattern;
 
 /**
  * Manages instances of {@link WebView}
@@ -118,11 +125,16 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   protected static final String REACT_CLASS = "RNCWebView";
   protected static final String HTML_ENCODING = "UTF-8";
   protected static final String HTML_MIME_TYPE = "text/html";
-  protected static final String JAVASCRIPT_INTERFACE = "ReactNativeWebView";
+  // protected static final String JAVASCRIPT_INTERFACE = "ReactNativeWebView";//这个是注入的对象
+  protected static final String JAVASCRIPT_INTERFACE = "GAOMUAPI_WEBVIEW_BRIDGE";//这个是注入的对象
   protected static final String HTTP_METHOD_POST = "POST";
   // Use `webView.loadUrl("about:blank")` to reliably reset the view
   // state and release page resources (including any running JavaScript).
   protected static final String BLANK_URL = "about:blank";
+
+  public static String COMURL = "";//请求替换的地址
+  public static String BASEFILEPATH ="file:///android_asset/bundle/";//文件目录
+
   protected WebViewConfig mWebViewConfig;
 
   protected RNCWebChromeClient mWebChromeClient = null;
@@ -421,8 +433,13 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
         view.loadDataWithBaseURL(baseUrl, html, HTML_MIME_TYPE, HTML_ENCODING, null);
         return;
       }
+      if(source.hasKey("srcPath")){
+        BASEFILEPATH=source.getString("srcPath");
+      }
       if (source.hasKey("uri")) {
         String url = source.getString("uri");
+        //chuming
+        COMURL = url.substring(0,url.lastIndexOf('/')+1);
         String previousUrl = view.getUrl();
         if (previousUrl != null && previousUrl.equals(url)) {
           return;
@@ -795,6 +812,48 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     public void setUrlPrefixesForDefaultIntent(ReadableArray specialUrls) {
       mUrlPrefixesForDefaultIntent = specialUrls;
+    }
+
+    // 复写shouldInterceptRequest
+    //API21以下用shouldInterceptRequest(WebView view, String url)
+    @Override
+    @SuppressWarnings("unchecked")
+    public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+      String p0 = "^http(s)?://([\\w-]+\\.)gaomuxuexi\\.com/(static/.*|index\\.htm){1}";//本地资源判断正则
+      boolean t=Pattern.matches(p0,url);
+      if(t){
+        //读取本地资源
+        String path = url.replace(COMURL,BASEFILEPATH);//获取文件访问的绝对路径
+        try {
+          URLConnection uc= getMimeType(path);//获取ContentType跟code
+          InputStream inputStream;
+          if(Pattern.matches("^file:///android_asset.*",path)){//这个资源要访问asset
+            inputStream=view.getContext().getAssets().open(path.replace("file:///android_asset/",""));
+          }else{//否则访问目录文件夹
+            inputStream=uc.getInputStream();
+          }
+          return new WebResourceResponse(uc.getContentType(), uc.getHeaderField("encoding"), inputStream);// getAssets().open(fn)读取文件，返回的是inputStream view.getContext().getAssets().open(fn)
+        } catch (IOException e) {
+          e.printStackTrace();
+        }
+      }
+      return super.shouldInterceptRequest(view, url);
+    }
+
+    // API21以上用shouldInterceptRequest(WebView view, WebResourceRequest request)
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+    @Override
+    public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+      return shouldInterceptRequest(view, request.getUrl().toString());
+    }
+
+    public URLConnection getMimeType(String fileUrl) throws java.io.IOException, MalformedURLException
+    {
+      if(!Pattern.matches("^[http|file].*",fileUrl)){
+          fileUrl="file://"+fileUrl;
+      }
+      URL u = new URL(fileUrl);
+      return u.openConnection();
     }
   }
 
